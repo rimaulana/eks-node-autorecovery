@@ -15,6 +15,11 @@ variable "oidc_provider_arn" {
   type        = string
 }
 
+variable "cluster_service_cidr" {
+  description = "EKS Cluster Service CIDR"
+  type        = string
+}
+
 variable "cluster_name" {
     type        = string
     description = "The name of EKS cluster"

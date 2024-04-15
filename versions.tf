@@ -9,6 +9,6 @@ terraform {
   }
   
   backend "local" {
-    path = "/home/ec2-user/environment/eks-node-autorecovery/terraform.tfstate"
+    path = "terraform.tfstate"
   }
 }

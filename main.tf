@@ -18,6 +18,10 @@ locals {
     blueprint  = local.name
     "auto-delete" = "no"
   }
+  scenario_one = "karpenter_solutions"
+  scenario_two = "cluster_autoscaler"
+  scenario_three = "challenge_1"
+  k8s_version = "1.29"
 }
 
 # Subnets 
@@ -37,8 +41,6 @@ module "vpc" {
   database_subnets      = [for k, v in local.azs : cidrsubnet(local.primary_cidr, 5, k + 15)]
   intra_subnets         = [for k, v in local.azs : cidrsubnet(local.primary_cidr, 5, k + 18)]
   redshift_subnets      = [for k, v in local.azs : cidrsubnet(local.secondary_cidr, 2, k)]
-  
- 
   enable_nat_gateway    = true
   single_nat_gateway    = true
 
@@ -146,7 +148,7 @@ module "vpc_endpoints" {
       service             = "ec2"
       private_dns_enabled = true
       subnet_ids          = [for k, v in local.azs : module.vpc.private_subnets[k]]
-      security_group_ids  = [aws_security_group.vpce_security_group_1.id]
+      security_group_ids  = [aws_security_group.vpce_security_group_2.id]
       # policy              = data.aws_iam_policy_document.generic_endpoint_policy.json
     },
     sts = {
@@ -170,13 +172,137 @@ module "vpc_endpoints" {
   })
 }
 
-# ################################################################################
-# # Troubleshooting Scenario Resources
-# ################################################################################
+################################################################################
+# Troubleshooting Scenario Resources
+################################################################################
+module "scenario_one" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.2"
 
-module karpenter {
+  cluster_name                   = local.scenario_one
+  cluster_version                = local.k8s_version
+  cluster_endpoint_public_access = true
+
+  vpc_id     = module.vpc.vpc_id
+  control_plane_subnet_ids = module.vpc.private_subnets
+  
+  authentication_mode = "API_AND_CONFIG_MAP"
+  enable_cluster_creator_admin_permissions = true
+  
+  fargate_profiles = {
+    # default = {
+    #   name = "default"
+    #   selectors = [
+    #     {
+    #       namespace = "kube-system"
+    #       labels = {
+    #         k8s-app = "kube-dns"
+    #       }
+    #     }
+    #   ]
+      
+    #   subnet_ids = [module.vpc.database_subnets[0]]
+      
+    #   tags = {
+    #     Owner = "default"
+    #   }
+
+    #   timeouts = {
+    #     create = "20m"
+    #     delete = "20m"
+    #   }
+    # }
+    
+    karpenter = {
+      name = "karpenter"
+      selectors = [
+        {
+          namespace = "karpenter"
+        }
+      ]
+      
+      subnet_ids = [module.vpc.database_subnets[0]]
+      
+      tags = {
+        Owner = "karpenter"
+      }
+
+      timeouts = {
+        create = "20m"
+        delete = "20m"
+      }
+    }
+  }
+
+  tags = merge(local.tags, {
+    # NOTE - if creating multiple security groups with this module, only tag the
+    # security group that Karpenter should utilize with the following tag
+    # (i.e. - at most, only one security group should have this tag in your account)
+    "karpenter.sh/discovery" = local.scenario_one
+    })
+}
+
+module "scenario_two" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.2"
+  cluster_name                   = local.scenario_two
+  cluster_version                = local.k8s_version
+  cluster_endpoint_public_access = true
+  vpc_id     = module.vpc.vpc_id
+  control_plane_subnet_ids = module.vpc.private_subnets
+
+  authentication_mode = "API_AND_CONFIG_MAP"
+  enable_cluster_creator_admin_permissions = true
+
+  fargate_profiles = {
+    cluster_autoscaler = {
+      name = "cluster_autoscaler"
+      selectors = [
+        {
+          namespace = "kube-system"
+          labels = {
+            "app.kubernetes.io/name" = "aws-cluster-autoscaler"
+          }
+        }
+      ]
+      
+      subnet_ids = [module.vpc.database_subnets[1]]
+      
+      tags = {
+        Owner = "cluster_autoscaler"
+      }
+
+      timeouts = {
+        create = "20m"
+        delete = "20m"
+      }
+    }
+  }
+
+  tags = local.tags
+}
+
+
+module "scenario_three" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.2"
+
+  cluster_name                   = local.scenario_three
+  cluster_version                = local.k8s_version
+  cluster_endpoint_public_access = true
+
+  vpc_id     = module.vpc.vpc_id
+  control_plane_subnet_ids = module.vpc.private_subnets
+  
+  authentication_mode = "API_AND_CONFIG_MAP"
+  enable_cluster_creator_admin_permissions = true
+
+  tags = local.tags
+}
+
+module scenario_one_workload {
   source                    = "./modules/karpenter"
-  cluster_name              = "karpenter_solutions"
+  cluster_name              = local.scenario_one
   cluster_version           = "1.29"
   selector                  = 0
   region                    = local.region
@@ -185,8 +311,53 @@ module karpenter {
   node_subnet_ids           = module.vpc.database_subnets
   cni_subnet_ids            = module.vpc.redshift_subnets
   multus_subnet_ids         = module.vpc.intra_subnets
-  vpce_sg_id                = aws_security_group.vpce_security_group_1.id
   multus_sg_id              = aws_security_group.multus_security_group.id
   multus_cidrs              = module.vpc.intra_subnets_cidr_blocks
-  control_plane_subnet_ids  = module.vpc.private_subnets
+  vpce_security_group = aws_security_group.vpce_security_group_2.id
+  cluster_endpoint = module.scenario_one.cluster_endpoint
+  cluster_certificate = module.scenario_one.cluster_certificate_authority_data
+  cluster_security_group = module.scenario_one.cluster_primary_security_group_id
+  oidc_provider_arn = module.scenario_one.oidc_provider_arn
+}
+
+module scenario_two_workload {
+  source                    = "./modules/cluster_autoscaler"
+  cluster_name              = local.scenario_two
+  cluster_version           = "1.29"
+  selector                  = 1
+  region                    = local.region
+  tags                      = local.tags
+  vpc_id                    = module.vpc.vpc_id
+  node_subnet_ids           = module.vpc.database_subnets
+  cni_subnet_ids            = module.vpc.redshift_subnets
+  multus_subnet_ids         = module.vpc.intra_subnets
+  multus_sg_id              = aws_security_group.multus_security_group.id
+  multus_cidrs              = module.vpc.intra_subnets_cidr_blocks
+  vpce_security_group = aws_security_group.vpce_security_group_2.id
+  cluster_endpoint = module.scenario_two.cluster_endpoint
+  cluster_certificate = module.scenario_two.cluster_certificate_authority_data
+  cluster_security_group = module.scenario_two.cluster_primary_security_group_id
+  oidc_provider_arn = module.scenario_two.oidc_provider_arn
+  cluster_service_cidr = module.scenario_two.cluster_service_cidr
+}
+
+module scenario_three_workload {
+  source                    = "./modules/challenge_1"
+  cluster_name              = local.scenario_three
+  cluster_version           = "1.29"
+  selector                  = 2
+  region                    = local.region
+  tags                      = local.tags
+  vpc_id                    = module.vpc.vpc_id
+  node_subnet_ids           = module.vpc.database_subnets
+  cni_subnet_ids            = module.vpc.redshift_subnets
+  multus_subnet_ids         = module.vpc.intra_subnets
+  multus_sg_id              = aws_security_group.multus_security_group.id
+  multus_cidrs              = module.vpc.intra_subnets_cidr_blocks
+  vpce_security_group = aws_security_group.vpce_security_group_2.id
+  cluster_endpoint = module.scenario_three.cluster_endpoint
+  cluster_certificate = module.scenario_three.cluster_certificate_authority_data
+  cluster_security_group = module.scenario_three.cluster_primary_security_group_id
+  oidc_provider_arn = module.scenario_three.oidc_provider_arn
+  cluster_service_cidr = module.scenario_three.cluster_service_cidr
 }

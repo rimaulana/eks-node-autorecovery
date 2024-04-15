@@ -1,12 +1,6 @@
 #! /bin/bash
 set -e
 
-CLUSTERS=(
-  scenario_three
-  scenario_two
-  scenario_one
-)
-
 if (! command -v terraform >> /dev/null); then
     echo "Installing terraform"
     sudo yum install -y yum-utils
@@ -54,11 +48,3 @@ if (! test -f .terraform.lock.hcl); then
 fi
 
 terraform apply -auto-approve
-
-REGION=$(terraform output -json region | jq -r ".")
-
-terraform output -json asg_name | jq -r '.[]' | while read -r asg; do aws autoscaling set-desired-capacity --region $REGION --auto-scaling-group-name $asg --desired-capacity 2; done
-
-for resource in "${CLUSTERS[@]}"; do
-    aws eks update-kubeconfig --name ${resource} --region $REGION
-done

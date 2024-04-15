@@ -25,11 +25,18 @@ instance_id=None
 def lambda_handler(event, context):
     subnetDetails ={}
     tagsArr=[]
-    instance_id = event['detail']['EC2InstanceId']
-    LifecycleHookName=event['detail']['LifecycleHookName']
-    AutoScalingGroupName=event['detail']['AutoScalingGroupName']
+    log(event)
+    instance_ids = []
+
+    for item in event['detail']['responseElements']['instancesSet']['items']:
+        instance_ids.append(item['instanceId'])
+    
+    # LifecycleHookName=event['detail']['LifecycleHookName']
+    # AutoScalingGroupName=event['detail']['AutoScalingGroupName']
     useStaticIPs=False
-    log("instance_id:"+str(instance_id) + " ASG:" + str(AutoScalingGroupName) + " LifecycleHookName" + str(LifecycleHookName) )   
+    # log("instance_id:"+str(instance_id) + " ASG:" + str(AutoScalingGroupName) + " LifecycleHookName" + str(LifecycleHookName) )   
+    for instance_id in instance_ids:
+        log("instance_id:"+str(instance_id))   
     ##Fetch the comma separated security group list for the multus interfaces
     if os.environ['SecGroupIds'] :
         secgroup_ids = os.environ['SecGroupIds'].split(",")
@@ -66,49 +73,50 @@ def lambda_handler(event, context):
             log("length of SecGroupIds :"+ len(secgroup_ids)  + "  not same as length of subnets "+ len(subnet_ids) )
             exit (1)               
 
-    if event["detail-type"] == "EC2 Instance-launch Lifecycle Action":
-        index = 1
-        ##iterate over the subnet list in order it is sent, create and attach ENIs  on the worker node in same order (i.e. firsat subnet as device-index 1 and nth subnet as device-index n)
-        for x in subnet_ids:
-            subnetDetails.clear()
-            interface_id=None
-            attachment=None
-            try: 
-                ##Check whether the subnet is also an ipv6 subnet
-                isIPv6=getsubnetData(x,subnetDetails)
-                if useStaticIPs == False:
-                    interface_id = create_interface(x,secgroup_ids[index-1],isIPv6,tags)
-                ##  if the flag for creating the secondary ENI statically is set, then create the ENI statically else use DHCP to allocate the IP                  
-                else:
-                    ## Get the list of free IPs from the begining of the subnet cidr in subnetDetails dictionary
-                    getFreeIPs(x,isIPv6,subnetDetails)  
-                    interface_id = create_interface_static(x,secgroup_ids[index-1],isIPv6,subnetDetails,tags)
-                ## if interface ENI  is successfully created then attach the ENI to instance  
-                if interface_id:
-                    time.sleep(DELAY_SEC)     ## sleep to get the resources created above to be available
-                    attachment = attach_interface(interface_id,instance_id,index)
-                index = index+1
-            except Exception as e:
-                log("Caught unexpected exception: " + str(e))
-            ## if the interface Creation for the attachment to the instace failed, then invoke the Lifecycle failure event for the worker, as this worker couldnt be used    
-            if not interface_id:
-                complete_lifecycle_action_failure(LifecycleHookName,AutoScalingGroupName,instance_id)
-                return
-            elif not attachment:
-                ## if the ENI was created but the attachment failed, due to some reason, then delete the ENI/interface as well
-                complete_lifecycle_action_failure(LifecycleHookName,AutoScalingGroupName,instance_id)
-                time.sleep(DELAY_SEC)
-                delete_interface(interface_id)               
-                return 
-        complete_lifecycle_action_success(LifecycleHookName,AutoScalingGroupName,instance_id)
+    if event["detail"]["eventName"] == "RunInstances":
+        for instance_id in instance_ids:
+            index = 1
+            ##iterate over the subnet list in order it is sent, create and attach ENIs  on the worker node in same order (i.e. firsat subnet as device-index 1 and nth subnet as device-index n)
+            for x in subnet_ids:
+                subnetDetails.clear()
+                interface_id=None
+                attachment=None
+                try: 
+                    ##Check whether the subnet is also an ipv6 subnet
+                    isIPv6=getsubnetData(x,subnetDetails)
+                    if useStaticIPs == False:
+                        interface_id = create_interface(x,secgroup_ids[index-1],isIPv6,tags)
+                    ##  if the flag for creating the secondary ENI statically is set, then create the ENI statically else use DHCP to allocate the IP                  
+                    else:
+                        ## Get the list of free IPs from the begining of the subnet cidr in subnetDetails dictionary
+                        getFreeIPs(x,isIPv6,subnetDetails)  
+                        interface_id = create_interface_static(x,secgroup_ids[index-1],isIPv6,subnetDetails,tags)
+                    ## if interface ENI  is successfully created then attach the ENI to instance  
+                    if interface_id:
+                        time.sleep(DELAY_SEC)     ## sleep to get the resources created above to be available
+                        attachment = attach_interface(interface_id,instance_id,index)
+                    index = index+1
+                except Exception as e:
+                    log("Caught unexpected exception: " + str(e))
+                ## if the interface Creation for the attachment to the instace failed, then invoke the Lifecycle failure event for the worker, as this worker couldnt be used    
+                if not interface_id:
+                    # complete_lifecycle_action_failure(LifecycleHookName,AutoScalingGroupName,instance_id)
+                    return
+                elif not attachment:
+                    ## if the ENI was created but the attachment failed, due to some reason, then delete the ENI/interface as well
+                    # complete_lifecycle_action_failure(LifecycleHookName,AutoScalingGroupName,instance_id)
+                    time.sleep(DELAY_SEC)
+                    delete_interface(interface_id)               
+                    return 
+            # complete_lifecycle_action_success(LifecycleHookName,AutoScalingGroupName,instance_id)
 
-    if event["detail-type"] == "EC2 Instance-terminate Lifecycle Action":
+    if event["detail"]["eventName"] == "TerminateInstances":
         interface_ids = []
         attachment_ids = []
 
         # -* K8s draining function should be added here -*#
 
-        complete_lifecycle_action_success(LifecycleHookName,AutoScalingGroupName,instance_id)
+        # complete_lifecycle_action_success(LifecycleHookName,AutoScalingGroupName,instance_id)
 
 
 ## This function reads the subnetdetails and stores the information like , subnet ipv4 & ipv6 cidr block. Function also retruns if the subnet is ipv6 or not
@@ -207,19 +215,28 @@ def attach_interface(network_interface_id, instance_id, index):
     log("attach_interface instance:" + instance_id +" eni:" + network_interface_id + " eni-index: " + str(index))
 
     if network_interface_id and instance_id:        
-        try:
-            attach_interface = ec2_client.attach_network_interface(
-                NetworkInterfaceId=network_interface_id,
-                InstanceId=instance_id,
-                DeviceIndex=index
-            )
-            if 'AttachmentId' in attach_interface.keys():
-                attachment = attach_interface['AttachmentId']
-                log("Created network attachment: {}".format(attachment))
-            else:
-                 log("Network attachment creation returned NULLL")                  
-        except botocore.exceptions.ClientError as e:
-            log("Error attaching network interface: {}".format(e.response['Error']))
+        for attempt in range(10):
+            try:
+                attach_interface = ec2_client.attach_network_interface(
+                    NetworkInterfaceId=network_interface_id,
+                    InstanceId=instance_id,
+                    DeviceIndex=index
+                )
+                if 'AttachmentId' in attach_interface.keys():
+                    attachment = attach_interface['AttachmentId']
+                    log("Created network attachment: {}".format(attachment))
+                else:
+                    log("Network attachment creation returned NULLL")                  
+            except botocore.exceptions.ClientError as e:
+                if 'Message' in e.response['Error']:
+                    if "stopped" in e.response['Error']['Message']:
+                        log("Error attaching network interface: {}, retrying".format(e.response['Error']))
+                        continue
+                else:
+                    log("Error attaching network interface: {}".format(e.response['Error']))
+                    break
+            break
+      
         try:
             network_interface = ec2.NetworkInterface(network_interface_id)
             #modify_attribute doesn't allow multiple parameter change at once..
@@ -369,3 +386,4 @@ def getFreeIPs(subnet_id,isIPv6, subnetDetails):
                     break
 def log(error):
     print('{}Z {}'.format(datetime.utcnow().isoformat(), error))
+

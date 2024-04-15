@@ -1,0 +1,32 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multus-app
+  labels:
+    app: multus-sample
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: multus-sample
+  template:
+    metadata:
+      labels:
+        app: multus-sample
+      annotations:
+        k8s.v1.cni.cncf.io/networks: ipvlan-multus
+    spec:
+      initContainers:
+      - name: aws-ip-mgmt
+        image: public.ecr.aws/rimaulana/aws-ip-manager:0.1
+        imagePullPolicy: IfNotPresent
+        args: [/bin/sh, -c, '/app/script.sh initContainers']
+      containers:
+      - name: app
+        env:
+        - name: WEB_ADDRESS
+          value: aws.amazon.com
+        image: centos
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do curl -s -o /dev/null -I --connect-timeout 5 -w \"%%{http_code}\\n\" http://$WEB_ADDRESS; sleep 5; done"]

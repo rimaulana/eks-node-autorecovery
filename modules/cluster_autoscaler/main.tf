@@ -13,16 +13,6 @@ resource "time_sleep" "this" {
   }
 }
 
-# Required for public ECR where Karpenter artifacts are hosted
-provider "aws" {
-  region = "us-east-1"
-  alias  = "virginia"
-}
-
-data "aws_ecrpublic_authorization_token" "token" {
-  provider = aws.virginia
-}
-
 provider "kubernetes" {
   host                   = var.cluster_endpoint
   cluster_ca_certificate = base64decode(var.cluster_certificate)
@@ -98,9 +88,9 @@ resource "aws_security_group" "eni_security_group" {
 
 resource "aws_security_group_rule" "cluster_security_group_rule" {
   type              = "ingress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
   security_group_id = var.cluster_security_group
   source_security_group_id  = aws_security_group.eni_security_group.id
 }
@@ -112,6 +102,15 @@ resource "aws_security_group_rule" "vpce_rule_custom_eni" {
   protocol          = "tcp"
   security_group_id = var.vpce_security_group
   source_security_group_id  = aws_security_group.eni_security_group.id
+}
+
+resource "aws_security_group_rule" "vpce_rule_custom_nodegroup" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  security_group_id = var.vpce_security_group
+  source_security_group_id  = aws_security_group.self_managed_node_security_group.id
 }
 
 data "aws_security_group" "fargate_profile" {
@@ -131,7 +130,6 @@ resource "aws_security_group_rule" "vpce_rule_fargate_profile" {
   security_group_id = var.vpce_security_group
   source_security_group_id  = data.aws_security_group.fargate_profile.id
 }
-
 
 ################################################################################
 # IRSA for EKS Managed Addons
@@ -175,22 +173,6 @@ module "eks_blueprints_addons" {
   cluster_endpoint  = var.cluster_endpoint
   cluster_version   = var.cluster_version
   oidc_provider_arn = var.oidc_provider_arn
-
-  # EKS Add-ons
-  enable_karpenter = true
-  karpenter = {
-    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-    repository_password = data.aws_ecrpublic_authorization_token.token.password
-    values = [
-      <<-EOT
-        dnsPolicy: Default
-      EOT
-    ]
-  }
-  karpenter_node = {
-    # Use static name so that it matches what is defined in `karpenter.yaml` example manifest
-    iam_role_use_name_prefix = false
-  }
   
   eks_addons = {
     vpc-cni    = {
@@ -208,66 +190,187 @@ module "eks_blueprints_addons" {
     kube-proxy = {
       most_recent    = true
     }
-    # coredns = {
-    #   configuration_values = jsonencode({
-    #     computeType = "Fargate"
-    #     # Ensure that the we fully utilize the minimum amount of resources that are supplied by
-    #     # Fargate https://docs.aws.amazon.com/eks/latest/userguide/fargate-pod-configuration.html
-    #     # Fargate adds 256 MB to each pod's memory reservation for the required Kubernetes
-    #     # components (kubelet, kube-proxy, and containerd). Fargate rounds up to the following
-    #     # compute configuration that most closely matches the sum of vCPU and memory requests in
-    #     # order to ensure pods always have the resources that they need to run.
-    #     resources = {
-    #       limits = {
-    #         cpu = "0.25"
-    #         # We are targeting the smallest Task size of 512Mb, so we subtract 256Mb from the
-    #         # request/limit to ensure we can fit within that task
-    #         memory = "256M"
-    #       }
-    #       requests = {
-    #         cpu = "0.25"
-    #         # We are targeting the smallest Task size of 512Mb, so we subtract 256Mb from the
-    #         # request/limit to ensure we can fit within that task
-    #         memory = "256M"
-    #       }
-    #     }
-    #   })
-    # }
+  }
+
+  enable_cluster_autoscaler = true
+  cluster_autoscaler = {
+    values = [
+      <<-EOT
+        extraArgs:
+          logtostderr: true
+          stderrthreshold: info
+          v: 4
+          skip-nodes-with-local-storage: true
+          skip-nodes-with-system-pods: true
+          balance-similar-node-groups: true
+          scale-down-unneeded-time: 1m0s
+          scale-down-unready-time: 30s
+          scale-down-delay-after-add: 1m0s
+        dnsPolicy: Default
+      EOT
+    ]
   }
   tags = local.tags
 }
 
-resource "aws_eks_access_entry" "example" {
-  cluster_name      = var.cluster_name
-  principal_arn     = module.eks_blueprints_addons.karpenter.node_iam_role_arn
-  type              = "EC2_LINUX"
+resource "aws_security_group_rule" "node_to_cluster" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  security_group_id = var.cluster_security_group
+  source_security_group_id  = aws_security_group.self_managed_node_security_group.id
 }
 
-# resource "aws_autoscaling_lifecycle_hook" "launch_hook" {
-#   name                   = "${var.cluster_name}-launch-lifecyclehook"
-#   autoscaling_group_name = module.self_managed_node_group.autoscaling_group_name
-#   default_result         = "ABANDON"
-#   heartbeat_timeout      = 300
-#   lifecycle_transition   = "autoscaling:EC2_INSTANCE_LAUNCHING"
-# }
+resource "aws_security_group" "self_managed_node_security_group" {
+  name        = "${var.cluster_name}-self-managed-node-sg"
+  description = "Self managed node security group"
+  vpc_id      = var.vpc_id
+  
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+  
+  ingress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    security_groups  = [var.cluster_security_group]
+    self             = true
+  }
 
-# resource "aws_autoscaling_lifecycle_hook" "terminate_hook" {
-#   name                   = "${var.cluster_name}-terminate-lifecyclehook"
-#   autoscaling_group_name = module.self_managed_node_group.autoscaling_group_name
-#   default_result         = "ABANDON"
-#   heartbeat_timeout      = 300
-#   lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
-# }
+  tags = local.tags
+}
+
+resource "aws_iam_role" "self_managed_node_role" {
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = [
+            "ec2.amazonaws.com"
+          ]
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+  managed_policy_arns = [
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  ]
+}
+
+resource "aws_iam_instance_profile" "self_managed_node_profile" {
+  role = aws_iam_role.self_managed_node_role.name
+}
+
+module "self_managed_node_group" {
+  source = "terraform-aws-modules/eks/aws//modules/self-managed-node-group"
+  depends_on = [
+    kubectl_manifest.eni_config_definitions
+  ]
+  name                = "${var.cluster_name}-node"
+  cluster_name        = var.cluster_name
+  cluster_version     = var.cluster_version
+  cluster_endpoint    = var.cluster_endpoint
+  cluster_auth_base64 = var.cluster_certificate
+  cluster_service_cidr= var.cluster_service_cidr
+  create_access_entry = true
+  create_iam_instance_profile = false
+  iam_instance_profile_arn = aws_iam_instance_profile.self_managed_node_profile.arn
+  iam_role_arn        = aws_iam_role.self_managed_node_role.arn
+
+  subnet_ids = [var.node_subnet_ids[var.selector]]
+
+  // The following variables are necessary if you decide to use the module outside of the parent EKS module context.
+  // Without it, the security groups of the nodes are empty and thus won't join the cluster.
+  vpc_security_group_ids = [
+    aws_security_group.self_managed_node_security_group.id
+  ]
+
+  min_size     = 0
+  max_size     = 10
+  desired_size = 0
+
+  bootstrap_extra_args = <<-EOT
+    --use-max-pods false --kubelet-extra-args '--max-pods=8'
+  EOT
+  
+  pre_bootstrap_user_data = <<-EOT
+    cat <<EOF >> /etc/cni/net.d/00-multus.conf
+    {
+      "cniVersion": "0.4.0",
+      "name": "multus-cni-network",
+      "type": "multus",
+      "capabilities": {"portMappings":true},
+      "cniConf": "/host/etc/cni/multus/net.d",
+      "kubeconfig": "/etc/cni/net.d/multus.d/multus.kubeconfig",
+      "delegates": [
+        {"cniVersion":"0.4.0","disableCheck":true,"name":"aws-cni","plugins":[{"mtu":"9001","name":"aws-cni","pluginLogFile":"/var/log/aws-routed-eni/plugin.log","pluginLogLevel":"DEBUG","podSGEnforcingMode":"strict","type":"aws-cni","vethPrefix":"eni"},{"enabled":"false","ipam":{"dataDir":"/run/cni/v4pd/egress-v6-ipam","ranges":[[{"subnet":"fd00::ac:00/118"}]],"routes":[{"dst":"::/0"}],"type":"host-local"},"mtu":"9001","name":"egress-cni","nodeIP":"","pluginLogFile":"/var/log/aws-routed-eni/egress-v6-plugin.log","pluginLogLevel":"DEBUG","randomizeSNAT":"prng","type":"egress-cni"},{"capabilities":{"portMappings":true},"snat":true,"type":"portmap"}]}
+      ]
+    }
+    EOF
+
+    echo "net.ipv4.conf.default.rp_filter = 0" | tee -a /etc/sysctl.conf
+    echo "net.ipv4.conf.all.rp_filter = 0" | tee -a /etc/sysctl.conf
+    sudo sysctl -p
+    sleep 100
+    ls /sys/class/net/ > /tmp/ethList;cat /tmp/ethList |while read line ; do sudo ifconfig $line up; done
+    grep eth /tmp/ethList |while read line ; do echo "ifconfig $line up" >> /etc/rc.d/rc.local; done
+    systemctl enable rc-local
+    chmod +x /etc/rc.d/rc.local
+  EOT
+
+  launch_template_name   = "${var.cluster_name}-node-lt"
+  instance_type          = "m5.large"
+
+  tags = {
+    Environment = "dev"
+    Terraform   = "true"
+    "k8s.io/cluster-autoscaler/enabled" = "true"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}" = ""
+  }
+}
+
+resource "aws_autoscaling_lifecycle_hook" "launch_hook" {
+  name                   = "${var.cluster_name}-launch-lifecyclehook"
+  autoscaling_group_name = module.self_managed_node_group.autoscaling_group_name
+  default_result         = "ABANDON"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_LAUNCHING"
+}
+
+resource "aws_autoscaling_lifecycle_hook" "terminate_hook" {
+  name                   = "${var.cluster_name}-terminate-lifecyclehook"
+  autoscaling_group_name = module.self_managed_node_group.autoscaling_group_name
+  default_result         = "ABANDON"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+}
 
 module lambda_eni {
-  source                = "../../modules/lambda_eni_karpenter"
+  source                = "../../modules/lambda_eni"
   name                  = "${var.cluster_name}-node-ip-management"
   multus_subnets        = var.multus_subnet_ids[var.selector]
   multus_security_groups= var.multus_sg_id
+  asg_name              = module.self_managed_node_group.autoscaling_group_name
 }
 
 resource "kubectl_manifest" "eni_config_definitions" {
   for_each = { for k, v in local.azs : v => var.cni_subnet_ids[k] }
+  depends_on = [
+    module.eks_blueprints_addons
+  ]
   apply_only = true
   yaml_body = <<-YAML
     apiVersion: crd.k8s.amazonaws.com/v1alpha1
@@ -331,130 +434,3 @@ resource "kubectl_manifest" "multus_nad" {
 ################################################################################
 # EKS WORKLOAD
 ################################################################################
-
-resource "kubectl_manifest" "karpenter_nodeclass" {
-  apply_only = true
-  wait_for_rollout = false
-  yaml_body = <<-YAML
-    apiVersion: karpenter.k8s.aws/v1beta1
-    kind: EC2NodeClass
-    metadata:
-      name: default
-    spec:
-      amiFamily: AL2
-      subnetSelectorTerms:
-        - id: ${var.node_subnet_ids[var.selector]}
-    
-      securityGroupSelectorTerms:
-        - tags:
-            aws:eks:cluster-name: "${var.cluster_name}"
-      instanceProfile: ${module.eks_blueprints_addons.karpenter.node_instance_profile_name}
-    
-      # Optional, overrides autogenerated userdata with a merge semantic
-      userData: |
-        cat <<EOF >> /etc/cni/net.d/00-multus.conf
-        {
-          "cniVersion": "0.4.0",
-          "name": "multus-cni-network",
-          "type": "multus",
-          "capabilities": {"portMappings":true},
-          "cniConf": "/host/etc/cni/multus/net.d",
-          "kubeconfig": "/etc/cni/net.d/multus.d/multus.kubeconfig",
-          "delegates": [
-            {"cniVersion":"0.4.0","disableCheck":true,"name":"aws-cni","plugins":[{"mtu":"9001","name":"aws-cni","pluginLogFile":"/var/log/aws-routed-eni/plugin.log","pluginLogLevel":"DEBUG","podSGEnforcingMode":"strict","type":"aws-cni","vethPrefix":"eni"},{"enabled":"false","ipam":{"dataDir":"/run/cni/v4pd/egress-v6-ipam","ranges":[[{"subnet":"fd00::ac:00/118"}]],"routes":[{"dst":"::/0"}],"type":"host-local"},"mtu":"9001","name":"egress-cni","nodeIP":"","pluginLogFile":"/var/log/aws-routed-eni/egress-v6-plugin.log","pluginLogLevel":"DEBUG","randomizeSNAT":"prng","type":"egress-cni"},{"capabilities":{"portMappings":true},"snat":true,"type":"portmap"}]}
-          ]
-        }
-        EOF
-        
-        echo "net.ipv4.conf.default.rp_filter = 0" | tee -a /etc/sysctl.conf
-        echo "net.ipv4.conf.all.rp_filter = 0" | tee -a /etc/sysctl.conf
-        sudo sysctl -p
-        sleep 100
-        ls /sys/class/net/ > /tmp/ethList;cat /tmp/ethList |while read line ; do sudo ifconfig $line up; done
-        grep eth /tmp/ethList |while read line ; do echo "ifconfig $line up" >> /etc/rc.d/rc.local; done
-        systemctl enable rc-local
-        chmod +x /etc/rc.d/rc.local
-    
-      # Optional, propagates tags to underlying EC2 resources
-      tags:
-        team: team-a
-        app: team-a-app
-    
-      # Optional, configures IMDS for the instance
-      metadataOptions:
-        httpEndpoint: enabled
-        httpProtocolIPv6: disabled
-        httpPutResponseHopLimit: 2
-        httpTokens: required
-  YAML
-  depends_on = [
-    module.eks_blueprints_addons
-  ]
-}
-
-resource "kubectl_manifest" "karpenter_nodepool" {
-  apply_only = true
-  wait_for_rollout = false
-  yaml_body = <<-YAML
-    apiVersion: karpenter.sh/v1beta1
-    kind: NodePool
-    metadata:
-      name: default
-    spec:
-      template:
-        metadata:
-          labels:
-            billing-team: my-team
-          annotations:
-            example.com/owner: "my-team"
-        spec:
-          nodeClassRef:
-            apiVersion: karpenter.k8s.aws/v1beta1
-            kind: EC2NodeClass
-            name: default
-          requirements:
-            - key: "kubernetes.io/arch"
-              operator: In
-              values: ["amd64"]
-            - key: "karpenter.sh/capacity-type"
-              operator: In
-              values: ["on-demand"]
-          kubelet:
-            systemReserved:
-              cpu: 100m
-              memory: 100Mi
-              ephemeral-storage: 1Gi
-            kubeReserved:
-              cpu: 200m
-              memory: 100Mi
-              ephemeral-storage: 3Gi
-            evictionHard:
-              memory.available: 5%
-              nodefs.available: 10%
-              nodefs.inodesFree: 10%
-            evictionSoft:
-              memory.available: 500Mi
-              nodefs.available: 15%
-              nodefs.inodesFree: 15%
-            evictionSoftGracePeriod:
-              memory.available: 1m
-              nodefs.available: 1m30s
-              nodefs.inodesFree: 2m
-            evictionMaxPodGracePeriod: 60
-            imageGCHighThresholdPercent: 85
-            imageGCLowThresholdPercent: 80
-            cpuCFSQuota: true
-            podsPerCore: 2
-      disruption:
-        consolidationPolicy: WhenUnderutilized
-        expireAfter: 2h
-      limits:
-        cpu: "1000"
-        memory: 1000Gi
-      weight: 10
-  YAML
-
-  depends_on = [
-    module.eks_blueprints_addons
-  ]
-}
