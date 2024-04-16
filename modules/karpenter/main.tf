@@ -176,6 +176,8 @@ module "eks_blueprints_addons" {
   cluster_version   = var.cluster_version
   oidc_provider_arn = var.oidc_provider_arn
 
+  create_delay_dependencies = var.create_delay_dependencies
+
   # EKS Add-ons
   enable_karpenter = true
   karpenter = {

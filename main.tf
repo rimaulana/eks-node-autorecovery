@@ -318,6 +318,7 @@ module scenario_one_workload {
   cluster_certificate = module.scenario_one.cluster_certificate_authority_data
   cluster_security_group = module.scenario_one.cluster_primary_security_group_id
   oidc_provider_arn = module.scenario_one.oidc_provider_arn
+  create_delay_dependencies = [ for prof in module.scenario_one.fargate_profiles : prof.fargate_profile_arn ]
 }
 
 module scenario_two_workload {
@@ -339,6 +340,7 @@ module scenario_two_workload {
   cluster_security_group = module.scenario_two.cluster_primary_security_group_id
   oidc_provider_arn = module.scenario_two.oidc_provider_arn
   cluster_service_cidr = module.scenario_two.cluster_service_cidr
+  create_delay_dependencies = [ for prof in module.scenario_two.fargate_profiles : prof.fargate_profile_arn ]
 }
 
 module scenario_three_workload {

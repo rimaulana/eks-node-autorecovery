@@ -173,6 +173,8 @@ module "eks_blueprints_addons" {
   cluster_endpoint  = var.cluster_endpoint
   cluster_version   = var.cluster_version
   oidc_provider_arn = var.oidc_provider_arn
+
+  create_delay_dependencies = var.create_delay_dependencies
   
   eks_addons = {
     vpc-cni    = {
