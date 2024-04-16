@@ -48,3 +48,7 @@ if (! test -f .terraform.lock.hcl); then
 fi
 
 terraform apply -auto-approve
+
+REGION=$(terraform output -json region | jq -r ".")
+
+terraform output -json cluster_names | jq -r '.[]' | while read -r cluster; do aws eks update-kubeconfig --name $cluster --region $REGION; done
