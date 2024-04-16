@@ -266,6 +266,7 @@ module lambda_eni {
   name                  = "${var.cluster_name}-node-ip-management"
   multus_subnets        = var.multus_subnet_ids[var.selector]
   multus_security_groups= var.multus_sg_id
+  karpenter_iam_role_arn= module.eks_blueprints_addons.gitops_metadata.karpenter_iam_role_arn
 }
 
 resource "kubectl_manifest" "eni_config_definitions" {
