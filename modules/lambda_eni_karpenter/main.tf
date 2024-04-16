@@ -53,7 +53,7 @@ resource "aws_cloudwatch_event_rule" "asg_event_rule" {
       userIdentity = {
         sessionContext = {
           sessionIssuer = {
-            arn = ["arn:aws:iam::460449571267:role/karpenter-20240325180838241600000023"]
+            arn = ["${var.karpenter_iam_role_arn}"]
           }
         }
       }
